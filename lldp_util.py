@@ -35,7 +35,7 @@ import pox.lib.packet as pkt
 #Global Var
 log = core.getLogger()
 VALIDATE_LINK_TIMEOUT = 20
-DELETE_LINK_TIMEOUT = 45
+DELETE_LINK_TIMEOUT = 35
 SEND_CYCLE = 1
 CYCLE_INTERVAL = 2
 TTL = 120
@@ -270,10 +270,11 @@ class LLDPUtil(EventMixin):
 
     def _handle_link_validate_timer(self):
         lldp_buffer = list()
-        for link,time in self.adjacency.items():
+        now = time.time()
+        for link,timestamp in self.adjacency.items():
             dpid = link.dpid1
             port = link.port1
-            if time + DELETE_LINK_TIMEOUT > time.time():
+            if timestamp + self.delete_link_timeout < now:
                 self._delete_link(dpid,port)
             else:
                 lldp = self._create_lldp_packet(dpid,port,self.port_addr[dpid][port])
@@ -319,7 +320,7 @@ class LLDPUtil(EventMixin):
         elif event.deleted or (event.modified and (event.ofp.desc.config is 0x0000001 or event.ofp.desc.state is 0x00000001)):
             log.debug("[%s] Port %i is down!",dpid_to_str(event.dpid),event.port)
             self._delete_link(event.dpid,event.port)
-            return
+
 
     def _handle_PacketIn(self,event):
         packet = event.parsed
