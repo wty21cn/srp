@@ -19,7 +19,7 @@
 """
 
 
-def launch(sn=3,**kw):
+def launch(tor_num=2,core_num=2,**kw):
     import pox.log.color
     pox.log.color.launch()
 
@@ -30,7 +30,7 @@ def launch(sn=3,**kw):
     pox.log.level.launch(**kw)
 
     import srp_config
-    srp_config.launch(sn)
+    srp_config.launch(tor_num,core_num)
 
     import base_util
     base_util.launch()

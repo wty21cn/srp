@@ -291,6 +291,9 @@ class ForwardingFunction (EventMixin):
     def _handle_ConnectionDown(self,event):
         dpid = dpid_to_str(event.connection.dpid)
 
+        if dpid in core.SRPConfig.core_list:
+            return
+
         log.debug("[%s] Clear non-static entry in ARPTable",dpid)
         for ip,entry in self.arp_table[dpid].items():
             if entry.static is not True:
@@ -312,6 +315,11 @@ class ForwardingFunction (EventMixin):
         src_ip = event.arpp.protosrc
         src_mac = event.arpp.hwsrc
         dst_ip = event.arpp.protodst
+
+        if dpid in core.SRPConfig.core_list:
+            log.debug("[%s] Ignore ARPRequest Packet from Core Switch!",dpid)
+            return
+
         if event.arpp.protodst in self.arp_table[dpid]:
             #如果本地存有此被请求表项，则交换机代替应答此ARPRequest
             dst_mac = self.arp_table[dpid][event.arpp.protodst].mac
@@ -335,6 +343,10 @@ class ForwardingFunction (EventMixin):
         dst_ip = event.arpp.protodst
         dst_mac = event.arpp.hwdst
         inport = event.inport
+
+        if dpid in core.SRPConfig.core_list:
+            log.debug("[%s] Ignore ARPReply Packet from Core Switch!",dpid)
+            return
 
         if same_network(dst_ip,core.SRPConfig.get_tor_lan_addr(dpid),32):
             self._send_arp_buffer(dpid,src_ip,src_mac,inport)
@@ -373,8 +385,12 @@ class ForwardingFunction (EventMixin):
         port = event.inport
         dpid = dpid_to_str(event.connection.dpid)
 
+        if dpid in core.SRPConfig.core_list:
+            log.debug("[%s] Ignore New Ip Mac Port Pair from Core Switch!",dpid)
+            return
+
         if not same_network(ip,core.SRPConfig.get_tor_lan_addr(dpid)):
-            log.debug("Ignore New IP Mac Port Pair with ip not belong to the DPID!")
+            log.debug("[%s] Ignore New IP Mac Port Pair with ip not belong to the DPID!",dpid)
             return
 
         if ip in self.arp_table[dpid]:
@@ -388,6 +404,9 @@ class ForwardingFunction (EventMixin):
         dst_ip = event.ipv4p.dstip
         dpid = dpid_to_str(event.connection.dpid)
         inport = event.inport
+
+        if dpid in core.SRPConfig.core_list:
+            return
 
         if same_network(dst_ip,core.SRPConfig.get_tor_lan_addr(dpid)):
             #判断目的网段是否在对应DPID连接的网段中

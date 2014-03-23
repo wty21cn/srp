@@ -203,7 +203,12 @@ class LLDPUtil(EventMixin):
         return originatorDPID, originatorPort, None
 
     def _send_lldp_buffer(self,lldp_buffer,times):
-        log.debug("[%s] Send lldp buffer! ",dpid_to_str(lldp_buffer[0].dpid))
+        dpids = list()
+        for packet in lldp_buffer:
+            if packet.dpid not in dpids:
+                dpids.append(packet.dpid)
+        for dpid in dpids:
+            log.debug("[%s] Send lldp buffer! ",dpid_to_str(dpid))
 
         for item in lldp_buffer:
             core.openflow.sendToDPID(item.dpid,item.packet)
@@ -282,7 +287,6 @@ class LLDPUtil(EventMixin):
         if len(lldp_buffer)>0:
             self._set_send_lldp_timer(lldp_buffer)
 
-
     def _handle_ConnectionUp(self,event):
         if self.install_flow:
             log.debug("[%s] Installing flow for LLDP packet", dpid_to_str(event.dpid))
@@ -316,11 +320,10 @@ class LLDPUtil(EventMixin):
             lldp_buffer = list()
             lldp  = self._create_lldp_packet(event.dpid,event.port,event.ofp.desc.hw_addr)
             lldp_buffer.append(LLDPUtil.SendItem(event.dpid,event.port,lldp))
-            self._set_timer(lldp_buffer)
+            self._set_send_lldp_timer(lldp_buffer)
         elif event.deleted or (event.modified and (event.ofp.desc.config is 0x0000001 or event.ofp.desc.state is 0x00000001)):
             log.debug("[%s] Port %i is down!",dpid_to_str(event.dpid),event.port)
             self._delete_link(event.dpid,event.port)
-
 
     def _handle_PacketIn(self,event):
         packet = event.parsed
