@@ -127,6 +127,16 @@ class ARPTable (dict):
         self[key] = value
 
 
+class ARPTableSet(dict):
+
+    def __repr__(self):
+        repr = list()
+        for dpid,table in self.items():
+            repr.append("DPID:"+dpid)
+            repr.append(table.__repr__()+"\n")
+        return "\n".join(repr)
+
+
 class SendARPRequest(Event):
 
     @property
@@ -205,7 +215,7 @@ class ForwardingFunction (EventMixin):
         def _get_config():
             log.debug('Config Module is loaded!')
 
-            self.arp_table = dict()
+            self.arp_table = ARPTableSet()
             for dpid in core.SRPConfig.tor_list:
                 self.arp_table[dpid] = ARPTable()
                 ip = IPAddr(parse_cidr(core.SRPConfig.get_tor_lan_addr(dpid))[0])

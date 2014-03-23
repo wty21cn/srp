@@ -36,6 +36,7 @@ class SRPConfig(object):
         return self.tor_addr_config[dpid]
 
     def __init__(self,tor_num,core_num):
+        core.addListeners(self)
         self.tor_list = set()
         self.tor_addr_config= dict()
         self.core_list = set()
@@ -47,6 +48,10 @@ class SRPConfig(object):
         for s in range(core_num):
             dpid = "10-00-%0.2x-00-00-00" % (s+1)
             self.core_list.add(dpid)
+
+    def _handle_GoingUpEvent(self, event):
+        core.openflow.addListeners(self)
+        log.debug("Up...")
 
 def launch(tor_num,core_num):
 
