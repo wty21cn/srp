@@ -34,7 +34,7 @@ import pox.lib.packet as pkt
 
 #Global Var
 log = core.getLogger()
-CHECK_LINK_TIMEOUT = 20
+VALIDATE_LINK_TIMEOUT = 20
 DELETE_LINK_TIMEOUT = 45
 SEND_CYCLE = 1
 CYCLE_INTERVAL = 2
@@ -101,17 +101,18 @@ class LLDPUtil(EventMixin):
     SendItem = namedtuple("LLDPSenderItem", ('dpid', 'port_num', 'packet'))
     Link = Link
 
-    def __init__(self,no_flows,explicit_drop,check_link_timeout,delete_link_timeout,flow_priority,ttl,send_cycle,cycle_interval):
+    def __init__(self,no_flows,explicit_drop,validate_link_timeout,delete_link_timeout,flow_priority,ttl,send_cycle,cycle_interval):
         self.install_flow = not no_flows
         self.explicit_drop = explicit_drop
-        self.check_link_timeout = check_link_timeout
+        self.validate_link_timeout = validate_link_timeout
         self.delete_link_timeout = delete_link_timeout
         self.flow_priority = flow_priority
         self.ttl = ttl
         self.send_cycle = send_cycle
         self.cycle_interval = cycle_interval
         self.adjacency = dict()
-
+        self._set_link_validate_timer(validate_link_timeout)
+        self.port_addr = dict()
         core.addListeners(self)
 
     def _install_flow(self,connection,priority=None):
@@ -236,22 +237,50 @@ class LLDPUtil(EventMixin):
         msg.data = eth.pack()
         return msg.pack()
 
-    def _set_timer(self,lldp_buffer):
+    def _delete_link(self,dpid,port=None):
+        if port is not None:
+            delete_link = None
+            for link in self.adjacency:
+                if link.is_connect_to_dpid_port(dpid,port):
+                    delete_link = link
+                    break
+            if delete_link is not None:
+                log.debug("Remove Link %s!",delete_link)
+                self.adjacency.pop(delete_link,None)
+                ev = LinkEvent(False,delete_link)
+                self.raiseEvent(ev)
+        else:
+            delete_link = list()
+            for link in self.adjacency:
+                if link.is_connect_to_dpid(dpid):
+                    delete_link.append(link)
+            for link in delete_link:
+                log.debug("Remove Link %s!",link)
+                self.adjacency.pop(link,None)
+                ev = LinkEvent(False,link)
+                self.raiseEvent(ev)
+
+    def _set_send_lldp_timer(self,lldp_buffer):
         for i in range(self.send_cycle):
             arg = (lldp_buffer,i+1)
             Timer(self.cycle_interval*i,self._send_lldp_buffer,absoluteTime=False,recurring=False,args = arg)
 
-    def _delete_link(self,dpid,port):
-        delete_link = None
-        for link in self.adjacency:
-            if link.is_connect_to_dpid_port(dpid,port):
-                delete_link = link
-                break
-        if delete_link is not None:
-            log.debug("Remove Link %s!",delete_link)
-            self.adjacency.pop(delete_link,None)
-            ev = LinkEvent(False,link)
-            self.raiseEvent(ev)
+    def _set_link_validate_timer(self,validate_time):
+        Timer(validate_time,self._handle_link_validate_timer,recurring=True)
+
+    def _handle_link_validate_timer(self):
+        lldp_buffer = list()
+        for link,time in self.adjacency.items():
+            dpid = link.dpid1
+            port = link.port1
+            if time + DELETE_LINK_TIMEOUT > time.time():
+                self._delete_link(dpid,port)
+            else:
+                lldp = self._create_lldp_packet(dpid,port,self.port_addr[dpid][port])
+                lldp_buffer.append(LLDPUtil.SendItem(dpid,port,lldp))
+        if len(lldp_buffer)>0:
+            self._set_send_lldp_timer(lldp_buffer)
+
 
     def _handle_ConnectionUp(self,event):
         if self.install_flow:
@@ -260,11 +289,20 @@ class LLDPUtil(EventMixin):
 
         ports = [(p.port_no, p.hw_addr) for p in event.ofp.ports]
         lldp_buffer = list()
+        if event.dpid not in self.port_addr:
+            self.port_addr[event.dpid] = dict()
         for port_num,port_addr in ports:
+            if port_num not in self.port_addr[event.dpid]:
+                self.port_addr[event.dpid][port_num] = port_addr
             lldp = self._create_lldp_packet(event.dpid,port_num,port_addr)
             lldp_buffer.append(LLDPUtil.SendItem(event.dpid,port_num,lldp))
 
-        self._set_timer(lldp_buffer)
+        self._set_send_lldp_timer(lldp_buffer)
+
+    def _handle_ConnectionDown(self,event):
+        if event.dpid in self.port_addr:
+            self.port_addr[event.dpid].clear()
+        self._delete_link(event.dpid)
 
     def _handle_GoingUpEvent(self,event):
         core.openflow.addListeners(self)
@@ -318,7 +356,7 @@ class LLDPUtil(EventMixin):
 
 def launch(no_flows=False,
            explicit_drop=True,
-           check_link_timeout=CHECK_LINK_TIMEOUT,
+           validate_link_timeout=VALIDATE_LINK_TIMEOUT,
            delete_link_timeout=DELETE_LINK_TIMEOUT,
            flow_priority = 65500,
            ttl = TTL,
@@ -328,7 +366,7 @@ def launch(no_flows=False,
     core.registerNew(LLDPUtil,
                      str_to_bool(no_flows),
                      str_to_bool(explicit_drop),
-                     int(check_link_timeout),
+                     int(validate_link_timeout),
                      int(delete_link_timeout),
                      int(flow_priority),
                      ttl,
