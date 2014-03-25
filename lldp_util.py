@@ -72,6 +72,8 @@ class Link(namedtuple("LinkBase", ("dpid1", "port1", "dpid2", "port2"))):
     def __repr__(self):
         return "Link(dpid1=%s,port1=%s, dpid2=%s,port2=%s)" % (self.dpid1,
                                                                self.port1, self.dpid2, self.port2)
+
+
 class Adjacency(dict):
 
     def __repr__(self):
@@ -79,6 +81,7 @@ class Adjacency(dict):
         for link,timestamp in self.items():
             repr.append(link.__str__())
         return "\n".join(repr)
+
 
 class LinkEvent(Event):
 

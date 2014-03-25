@@ -34,6 +34,7 @@ def create_test_topo(hn=3,tor_num=2,core_num=2):
         dpid = "00000000%0.2x000000" % (i+1)
         tswitches.append(net.addSwitch(name,dpid=dpid ))
         info(tswitches[i],' ')
+    info("\n")
     cswitches = []
     info('Add Core Switch: ')
     for i in range(core_num):

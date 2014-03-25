@@ -19,7 +19,7 @@
 """
 
 
-def launch(tor_num=2,core_num=2,**kw):
+def launch(tor_num=5,core_num=4,**kw):
     import pox.log.color
     pox.log.color.launch()
 
@@ -40,5 +40,8 @@ def launch(tor_num=2,core_num=2,**kw):
 
     import lldp_util
     lldp_util.launch()
+
+    import srp_func
+    srp_func.launch()
 
 
