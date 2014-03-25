@@ -20,7 +20,7 @@ from collections import namedtuple
 from pox.lib.util import dpid_to_str,str_to_bool
 from pox.lib.revent import EventHalt
 from pox.lib.recoco import Timer
-from pox.lib.addresses import parse_cidr,parse_network
+from pox.lib.addresses import parse_cidr,parse_prefix
 
 import time
 import datetime
@@ -33,12 +33,21 @@ log = core.getLogger()
 
 class SRPGrid_Row(dict):
 
-    def __init__(self,desc,prefix,mask):
+    def __init__(self,dpid,prefix,mask):
         dict.__init__({})
-        self.desc = desc
+        self.dpid = dpid
         self.prefix = prefix
         self.mask  = mask
 
+class SRPGrid_Set(dict):
+
+    def __repr__(self):
+        repr = ""
+        for grid in self.values():
+            repr += "=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-"
+            repr += grid.__repr__()
+            repr += "=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-\n"
+        return repr
 
 class SRPGrid(list):
 
@@ -59,11 +68,11 @@ class SRPGrid(list):
                 return True
         return False
 
-    def modify_column(self,dpid):
+    def modify_core_column(self,dpid):
         keys = list()
         new_row = None
         for row in self:
-            if row.desc == dpid:
+            if row.dpid == dpid:
                 new_row = row
                 for key,value in row.items():
                     row[key] = -1
@@ -77,12 +86,19 @@ class SRPGrid(list):
             for key in keys:
                 new_row[key] = -1
 
+    def modify_tor_column(self,dpid):
+        for row in self:
+            if dpid not in row:
+                row[dpid] = 0
+
 
 class SRPFunction(object):
 
     def __init__(self):
-        self.core_grid = dict()
-        self.tor_grid = dict()
+        self.core_grid = SRPGrid_Set()
+        self.tor_grid = SRPGrid_Set()
+        core.Interactive.variables["core_grid"] = self.core_grid
+        core.Interactive.variables["tor_grid"] = self.tor_grid
 
         # Listen to dependencies
         core.addListeners(self)
@@ -99,24 +115,34 @@ class SRPFunction(object):
         dpid = dpid_to_str(event.dpid)
 
         if dpid in core.SRPConfig.core_list:
+            if dpid in self.core_grid:
+                del self.core_grid[dpid]
             self.core_grid[dpid] = SRPGrid(dpid)
         elif dpid in core.SRPConfig.tor_list:
+            if dpid in self.tor_grid:
+                del self.tor_grid[dpid]
             self.tor_grid[dpid] = SRPGrid(dpid)
 
-        #将每个Tor对应的网段，加入到Core SRPGrid Row中,并将Tor加入到每个Row的Column中，并更新对应Column中的数字
+        #将每个Tor对应的网段，加入到Core SRPGrid Row中,并将Tor加入到每个Row的Column中，并更新对应Column中的初始值
         for tor_dpid in self.tor_grid.keys():
             host,mask = parse_cidr(core.SRPConfig.get_tor_lan_addr(tor_dpid))
-            network= parse_network(host,mask)
+            prefix= parse_prefix(host,mask)
             for core_dpid,core_rows in self.core_grid.items():
-                if not core_rows.has_network(network,mask):
-                    core_rows.append(SRPGrid_Row(tor_dpid,network,mask))
-                    core_rows.modify_column(tor_dpid)
-                    log.debug(core_rows)
+                if not core_rows.has_network(prefix,mask):
+                    core_rows.append(SRPGrid_Row(tor_dpid,prefix,mask))
+                    core_rows.modify_core_column(tor_dpid)
 
-        #for tor grid
-        for core_dpid in self.core_grid.keys():
-            for tor_dpid,tor_row in self.tor_grid.items():
-                return
+        #将Core能到达的网段加入它所连接的每一个Tor，将Core加入到相应Row的Column中，并更新对应Column中的初始值
+        for core_dpid,core_rows in self.core_grid.items():
+            for row in core_rows:
+                prefix  = row.prefix
+                mask = row.mask
+                dpid = row.dpid
+                for tor_dpid,tor_rows in self.tor_grid.items():
+                    if not tor_rows.has_network(prefix,mask):
+                        if tor_dpid != dpid:
+                            tor_rows.append(SRPGrid_Row(core_dpid,prefix,mask))
+                    tor_rows.modify_tor_column(core_dpid)
 
 
     def _handle_ConnectionDown(self,event):
