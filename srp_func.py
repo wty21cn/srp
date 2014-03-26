@@ -199,7 +199,7 @@ class SRPFunction(object):
                 #清楚所有DPID对应的Core_Grid的相应行
                 for core_rows in self.core_grid.values():
                     core_rows.del_row(dpid,prefix,mask)
-
+                    core_rows.del_column(dpid)
                     #清楚所有DPID对应的Tor_Grid的相应行
                     for tor_rows in self.tor_grid.values():
                         tor_rows.del_row(dpid,prefix,mask)
