@@ -26,7 +26,7 @@ tor_addr_config Dict--配置各个Tor Switch连接的LAN网段是多少
 from pox.core import core
 
 
-# Create a logger for this component
+#Global Var
 log = core.getLogger()
 
 

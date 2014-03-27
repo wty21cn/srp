@@ -170,7 +170,7 @@ class BaseUtil (EventMixin):
         event.connection.send(msg)
 
     def _handle_GoingUpEvent(self, event):
-        core.openflow.addListeners(self)
+        core.openflow.addListeners(self,priority=100)
         log.debug("Up...")
 
     def _handle_ConnectionUp(self, event):

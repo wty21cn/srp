@@ -208,7 +208,7 @@ class ForwardingFunction (EventMixin):
         # Listen to dependencies
         core.addListeners(self)
         def _listen_to_dependencies():
-            core.BaseUtil.addListeners(self)
+            core.BaseUtil.addListeners(self,priority=100)
         core.call_when_ready(_listen_to_dependencies, ('BaseUtil',))
 
         #Get SRPConfig
