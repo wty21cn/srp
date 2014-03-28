@@ -37,7 +37,9 @@ log = core.getLogger()
 VALIDATE_LINK_TIMEOUT = 20
 DELETE_LINK_TIMEOUT = 35
 SEND_CYCLE = 1
-CYCLE_INTERVAL = 2
+SEND_LLDP_CYCLE_INTERVAL = 2
+RAISE_LINK_EVENT_CYCLE_INTERVAL = 1
+
 TTL = 120
 
 class Link(namedtuple("LinkBase", ("dpid1", "port1", "dpid2", "port2"))):
@@ -94,6 +96,7 @@ class LinkEvent(Event):
         self.link = link
         self.added = add
         self.removed = not add
+        self.used = True
 
     def port_for_dpid(self, dpid):
         if self.link.dpid1 == dpid:
@@ -110,7 +113,7 @@ class LLDPUtil(EventMixin):
     SendItem = namedtuple("LLDPSenderItem", ('dpid', 'port_num', 'packet'))
     Link = Link
 
-    def __init__(self,no_flows,explicit_drop,validate_link_timeout,delete_link_timeout,flow_priority,ttl,send_cycle,cycle_interval):
+    def __init__(self,no_flows,explicit_drop,validate_link_timeout,delete_link_timeout,flow_priority,ttl,send_cycle,send_lldp_cycle_interval,raise_link_event_cycle_interval):
         self.install_flow = not no_flows
         self.explicit_drop = explicit_drop
         self.validate_link_timeout = validate_link_timeout
@@ -118,7 +121,8 @@ class LLDPUtil(EventMixin):
         self.flow_priority = flow_priority
         self.ttl = ttl
         self.send_cycle = send_cycle
-        self.cycle_interval = cycle_interval
+        self.send_lldp_cycle_interval = send_lldp_cycle_interval
+        self.raise_link_event_cycle_interval = raise_link_event_cycle_interval
         self.adjacency = Adjacency()
         self._set_link_validate_timer(validate_link_timeout)
         self.port_addr = dict()
@@ -277,11 +281,20 @@ class LLDPUtil(EventMixin):
 
     def _set_send_lldp_timer(self,lldp_buffer):
         for i in range(self.send_cycle):
-            arg = (lldp_buffer,i+1)
-            Timer(self.cycle_interval*i,self._send_lldp_buffer,absoluteTime=False,recurring=False,args = arg)
+            arg = (lldp_buffer,i)
+            Timer(self.send_lldp_cycle_interval*i,self._send_lldp_buffer,absoluteTime=False,recurring=False,args = arg)
 
     def _set_link_validate_timer(self,validate_time):
         Timer(validate_time,self._handle_link_validate_timer,recurring=True)
+        
+    def _handle_raise_link_event_timer(self,event):
+        self.raiseEvent(event)
+        log.info('Link detected: %s', event.link)
+        if event.used:
+            return False
+
+    def _set_raise_link_event_timer(self,event):
+        Timer(self.raise_link_event_cycle_interval,self._handle_raise_link_event_timer,recurring=True,args = (event,))
 
     def _handle_link_validate_timer(self):
         lldp_buffer = list()
@@ -361,9 +374,8 @@ class LLDPUtil(EventMixin):
         link = Link(originatorDPID, originatorPort, event.dpid, event.port).uni
         if link not in self.adjacency:
             self.adjacency[link] = time.time()
-            log.info('Link detected: %s', link)
             ev = LinkEvent(True,link)
-            self.raiseEvent(ev)
+            self._set_raise_link_event_timer(ev)
         else:
             self.adjacency[link] = time.time()
 
@@ -375,7 +387,8 @@ def launch(no_flows=False,
            flow_priority = 65500,
            ttl = TTL,
            send_cycle = SEND_CYCLE,
-           cycle_interval = CYCLE_INTERVAL):
+           send_lldp_cycle_interval = SEND_LLDP_CYCLE_INTERVAL,
+           raise_link_event_cycle_interval = RAISE_LINK_EVENT_CYCLE_INTERVAL):
 
     core.registerNew(LLDPUtil,
                      str_to_bool(no_flows),
@@ -385,4 +398,5 @@ def launch(no_flows=False,
                      int(flow_priority),
                      ttl,
                      send_cycle,
-                     cycle_interval)
+                     send_lldp_cycle_interval,
+                     raise_link_event_cycle_interval)

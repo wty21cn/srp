@@ -19,7 +19,7 @@
 """
 
 
-def launch(tor_num=5,core_num=4,**kw):
+def launch(tor_num=20,core_num=6,**kw):
     import pox.log.color
     pox.log.color.launch()
 

@@ -31,6 +31,7 @@ import pox.lib.packet as pkt
 
 #Global Var
 log = core.getLogger()
+FLOW_IDLE_TIMEOUT = of.OFP_FLOW_PERMANENT
 
 class Debug_Event(Event):
 
@@ -206,27 +207,135 @@ class SRPFunction(object):
                     for tor_rows in self.tor_grid.values():
                         tor_rows.del_row(dpid,prefix,mask)
 
-
-    def _modify_flow(self,dpid,command,match,action):
-        msg = of.ofp_flow_mod()
-        msg.command = command
-        msg.match = match
-        msg.actions.append(action)
-        core.openflow.sendToDPID(str_to_dpid(dpid),msg)
-
-
     def _handle_LinkEvent(self,event):
         if dpid_to_str(event.link.dpid1) in core.SRPConfig.tor_list:
             tor_dpid,core_dpid = dpid_to_str(event.link.dpid1),dpid_to_str(event.link.dpid2)
-            self.tor_grid.port[core_dpid] = event.link.port2
-            self.core_grid.port[tor_dpid] = event.link.port1
+            if tor_dpid not in self.tor_grid or core_dpid not in self.core_grid:
+                event.used = False
+                return
+            if event.added:
+                self.tor_grid[tor_dpid].port[core_dpid] = event.link.port1
+                self.core_grid[core_dpid].port[tor_dpid] = event.link.port2
+            elif event.removed:
+                self.tor_grid[tor_dpid].port[core_dpid] = None
+                self.core_grid[core_dpid].port[tor_dpid] = None
         else:
             tor_dpid,core_dpid = dpid_to_str(event.link.dpid2),dpid_to_str(event.link.dpid1)
-            self.tor_grid.port[core_dpid] = event.link.port1
-            self.core_grid.port[tor_dpid] = event.link.port2
+            if event.added:
+                self.tor_grid[tor_dpid].port[core_dpid] = event.link.port2
+                self.core_grid[core_dpid].port[tor_dpid] = event.link.port1
+            elif link.removed:
+                self.tor_grid[tor_dpid].port[core_dpid] = None
+                self.core_grid[core_dpid].port[tor_dpid] = None
 
+        if event.added:
+            #更改此UP链路连接的Tor的Grid中UP链路链接的Core对应的状态值
+            for tor_row in self.tor_grid[tor_dpid]:
+                if core_dpid in tor_row:
+                    if tor_row[core_dpid] % 2 == 0:
+                        tor_row[core_dpid] += 1
+                        #统计此core_dpid在此tor_grid中的位置
+                        pos = list()
+                        first = True
+                        for dpid in tor_row.keys():
+                            pos.append(str_to_dpid(dpid))
+                        pos.sort()
+                        for dpid in pos:
+                            if tor_row[dpid_to_str(dpid)] == 1:
+                                if dpid_to_str(dpid) == core_dpid:
+                                    break
+                                else:
+                                    first = False
+                                    break
+                        #如果此core_dpid是状态为1的最前的dpid，则删除原流表并下发新流表，如果不是则不做处理
+                        if first:
+                            #删除旧流表
+                            match = of.ofp_match()
+                            match.dl_type = pkt.ethernet.IP_TYPE
+                            match.nw_dst = tor_row.prefix.toStr() + "/" + str(tor_row.mask)
+                            msg = of.ofp_flow_mod(command = of.OFPFC_DELETE,
+                                                  match = match)
+                            core.openflow.sendToDPID(str_to_dpid(tor_dpid),msg)
 
-        if event.removed:
+                            #下发新流表
+                            match = of.ofp_match()
+                            match.dl_type = pkt.ethernet.IP_TYPE
+                            match.nw_dst = tor_row.prefix.toStr() + "/" + str(tor_row.mask)
+                            actions = list()
+                            actions.append(of.ofp_action_output(port = self.tor_grid[tor_dpid].port[core_dpid]))
+                            msg = of.ofp_flow_mod(command = of.OFPFC_ADD,
+                                                  match = match,
+                                                  actions = actions,
+                                                  idle_timeout = FLOW_IDLE_TIMEOUT,
+                                                  hard_timeout = of.OFP_FLOW_PERMANENT)
+                            core.openflow.sendToDPID(str_to_dpid(tor_dpid),msg)
+            #更改此UP链路连接的Core的Grid中UP链路连接的Tor对应的状态值
+            for core_row in self.core_grid[core_dpid]:
+                if tor_dpid in core_row:
+                    if core_row[tor_dpid] != -1 and core_row[tor_dpid] % 2 == 0:
+                        core_row[tor_dpid] += 1
+                        #下发新流表
+                        match = of.ofp_match()
+                        match.dl_type = pkt.ethernet.IP_TYPE
+                        match.nw_dst = core_row.prefix.toStr()+'/'+str(core_row.mask)
+                        actions = list()
+                        actions.append(of.ofp_action_output(port = self.core_grid[core_dpid].port[tor_dpid]))
+                        msg = of.ofp_flow_mod(command = of.OFPFC_ADD,
+                                              match = match,
+                                              actions = actions,
+                                              idle_timeout = FLOW_IDLE_TIMEOUT,
+                                              hard_timeout = of.OFP_FLOW_PERMANENT)
+                        core.openflow.sendToDPID(str_to_dpid(core_dpid),msg)
+
+                        #更新其他的受影响的Tor的Grid
+                        for tor_rows in self.tor_grid.values():
+                            if tor_rows.dpid == tor_dpid:
+                                continue
+                            for tor_row in tor_rows:
+                                if tor_row.dpid == tor_dpid and tor_row.prefix == core_row.prefix and tor_row.mask == core_row.mask:
+                                    if tor_row[core_dpid] % 2 != 0:
+                                        continue
+
+                                    #统计此core_dpid在此tor_grid中的位置
+                                    pos = list()
+                                    first = True
+                                    for dpid in tor_row.keys():
+                                        pos.append(str_to_dpid(dpid))
+                                    pos.sort()
+                                    for dpid in pos:
+                                        if tor_row[dpid_to_str(dpid)] == 1:
+                                            if dpid_to_str(dpid) == core_dpid:
+                                                break
+                                            else:
+                                                first = False
+                                                break
+                                    #如果此core_dpid是状态为1的最前的dpid，则删除原流表并下发新流表，如果不是则不做处理
+                                    if first:
+                                        if core_dpid in tor_row and core_dpid in tor_rows.port:
+                                            if tor_rows.port[core_dpid] is not None:
+                                                tor_row[core_dpid] += 1
+
+                                                #删除旧流表
+                                                match = of.ofp_match()
+                                                match.dl_type = pkt.ethernet.IP_TYPE
+                                                match.nw_dst = tor_row.prefix.toStr() + "/" + str(tor_row.mask)
+                                                msg = of.ofp_flow_mod(command = of.OFPFC_DELETE,
+                                                                      match = match)
+                                                core.openflow.sendToDPID(str_to_dpid(tor_rows.dpid),msg)
+
+                                                #下发新流表
+                                                match = of.ofp_match()
+                                                match.dl_type = pkt.ethernet.IP_TYPE
+                                                match.nw_dst = tor_row.prefix.toStr() + "/" + str(tor_row.mask)
+                                                actions = list()
+                                                actions.append(of.ofp_action_output(port = tor_rows.port[core_dpid]))
+                                                msg = of.ofp_flow_mod(command = of.OFPFC_ADD,
+                                                                      match = match,
+                                                                      actions = actions,
+                                                                      idle_timeout = FLOW_IDLE_TIMEOUT,
+                                                                      hard_timeout = of.OFP_FLOW_PERMANENT)
+                                                core.openflow.sendToDPID(str_to_dpid(tor_rows.dpid),msg)
+        elif event.removed:
             #更改此断掉链路原连接的Core的Grid中断掉链路原链接的Tor对应的状态值
             for core_row in self.core_grid[core_dpid]:
                 if tor_dpid in core_row:
@@ -237,7 +346,7 @@ class SRPFunction(object):
                         #删除此Core上无效的流表
                         match = of.ofp_match()
                         match.dl_type = pkt.ethernet.IP_TYPE
-                        match.nw_dst = (IPAddr(core_row.prefix),core_row.mask)
+                        match.nw_dst = core_row.prefix.toStr() + "/" + str(core_row.mask)
                         msg = of.ofp_flow_mod(command = of.OFPFC_DELETE,
                                               match = match)
                         core.openflow.sendToDPID(str_to_dpid(core_dpid),msg)
@@ -256,14 +365,14 @@ class SRPFunction(object):
                                     pos = list()
                                     first = True
                                     next = False
-                                    for dpid in tor_row.keys:
+                                    for dpid in tor_row.keys():
                                         pos.append(str_to_dpid(dpid))
                                     pos.sort()
                                     for dpid in pos:
-                                        if dpid == core_dpid:
+                                        if dpid_to_str(dpid) == core_dpid:
                                             #此时此core_dpid之前没有值为1，要寻找下一个值为1的core_dpid
                                             next = True
-                                        elif row[dpid_to_str(dpid)] == 1:
+                                        elif tor_row[dpid_to_str(dpid)] == 1:
                                             if not next:
                                                 #此时此core_dpid之前还有值为1，则不用修改流表
                                                 first = False
@@ -279,7 +388,7 @@ class SRPFunction(object):
                                         if next is True:
                                             match = of.ofp_match()
                                             match.dl_type = pkt.ethernet.IP_TYPE
-                                            match.nw_dst = (IPAddr(tor_row.prefix),tor_row.mask)
+                                            match.nw_dst = tor_row.prefix.toStr() + "/" + str(tor_row.mask)
                                             msg = of.ofp_flow_mod(command = of.OFPFC_DELETE,
                                                                   match = match)
                                             core.openflow.sendToDPID(str_to_dpid(tor_dpid),msg)
@@ -288,41 +397,42 @@ class SRPFunction(object):
                                             #删除旧流表
                                             match = of.ofp_match()
                                             match.dl_type = pkt.ethernet.IP_TYPE
-                                            match.nw_dst = (IPAddr(tor_row.prefix),tor_row.mask)
+                                            match.nw_dst = tor_row.prefix.toStr() + "/" + str(tor_row.mask)
                                             msg = of.ofp_flow_mod(command = of.OFPFC_DELETE,
                                                                   match = match)
-                                            core.openflow.sendToDPID(str_to_dpid(tor_dpid),msg)
+                                            core.openflow.sendToDPID(str_to_dpid(tor_rows.dpid),msg)
 
                                             #下发新流表
-                                            match = of.ofp_match()
-                                            match.dl_type = pkt.ethernet.IP_TYPE
-                                            match.nw_dst = (IPAddr(tor_row.prefix),tor_row.mask)
-                                            actions = list()
-                                            actions.append(of.ofp_action_output(port = tor_rows.port[next]))
-                                            msg = of.ofp_flow_mod(command = of.OFPFC_ADD,
-                                                                  match = match,
-                                                                  actions = actions,
-                                                                  idle_timeout = FLOW_IDLE_TIMEOUT,
-                                                                  hard_timeout = of.OFP_FLOW_PERMANENT)
-                                            core.openflow.sendToDPID(str_to_dpid(tor_dpid),msg)
+                                            if tor_rows.port[next] is not None:
+                                                match = of.ofp_match()
+                                                match.dl_type = pkt.ethernet.IP_TYPE
+                                                match.nw_dst = tor_row.prefix.toStr() + "/" + str(tor_row.mask)
+                                                actions = list()
+                                                actions.append(of.ofp_action_output(port = tor_rows.port[next]))
+                                                msg = of.ofp_flow_mod(command = of.OFPFC_ADD,
+                                                                      match = match,
+                                                                      actions = actions,
+                                                                      idle_timeout = FLOW_IDLE_TIMEOUT,
+                                                                      hard_timeout = of.OFP_FLOW_PERMANENT)
+                                                core.openflow.sendToDPID(str_to_dpid(tor_rows.dpid),msg)
 
             #更改此断掉链路原连接的Tor的Grid中断掉链路原链接的Core对应的状态值
             for tor_row in self.tor_grid[tor_dpid]:
-                if core_dpid in row:
+                if core_dpid in tor_row:
                     if tor_row[core_dpid] % 2 == 1:
                         tor_row[core_dpid] -= 1
                         #统计此core_dpid在此tor_grid中的位置
                         pos = list()
                         first = True
                         next = False
-                        for dpid in tor_row.keys:
+                        for dpid in tor_row.keys():
                             pos.append(str_to_dpid(dpid))
                         pos.sort()
                         for dpid in pos:
-                            if dpid == core_dpid:
+                            if dpid_to_str(dpid) == core_dpid:
                             #此时此core_dpid之前没有值为1，要寻找下一个值为1的core_dpid
                                 next = True
-                            elif row[dpid_to_str(dpid)] == 1:
+                            elif tor_row[dpid_to_str(dpid)] == 1:
                                 if not next:
                                 #此时此core_dpid之前还有值为1，则不用修改流表
                                     first = False
@@ -338,7 +448,7 @@ class SRPFunction(object):
                             if next is True:
                                 match = of.ofp_match()
                                 match.dl_type = pkt.ethernet.IP_TYPE
-                                match.nw_dst = (IPAddr(tor_row.prefix),tor_row.mask)
+                                match.nw_dst = tor_row.prefix.toStr() + "/" + str(tor_row.mask)
                                 msg = of.ofp_flow_mod(command = of.OFPFC_DELETE,
                                                       match = match)
                                 core.openflow.sendToDPID(str_to_dpid(tor_dpid),msg)
@@ -347,68 +457,24 @@ class SRPFunction(object):
                                 #删除旧流表
                                 match = of.ofp_match()
                                 match.dl_type = pkt.ethernet.IP_TYPE
-                                match.nw_dst = (IPAddr(tor_row.prefix),tor_row.mask)
+                                match.nw_dst = tor_row.prefix.toStr() + "/" + str(tor_row.mask)
                                 msg = of.ofp_flow_mod(command = of.OFPFC_DELETE,
                                                       match = match)
                                 core.openflow.sendToDPID(str_to_dpid(tor_dpid),msg)
 
                                 #下发新流表
-                                match = of.ofp_match()
-                                match.dl_type = pkt.ethernet.IP_TYPE
-                                match.nw_dst = (IPAddr(tor_row.prefix),tor_row.mask)
-                                actions = list()
-                                actions.append(of.ofp_action_output(port = self.tor_grid[tor_dpid].port[next]))
-                                msg = of.ofp_flow_mod(command = of.OFPFC_ADD,
-                                                      match = match,
-                                                      actions = actions,
-                                                      idle_timeout = FLOW_IDLE_TIMEOUT,
-                                                      hard_timeout = of.OFP_FLOW_PERMANENT)
-                                core.openflow.sendToDPID(str_to_dpid(tor_dpid),msg)
-
-        elif event.added:
-            #更改此UP链路连接的Tor的Grid中UP链路链接的Core对应的状态值
-            for tor_row in self.tor_grid[tor_dpid]:
-                if core_dpid in tor_row:
-                    if tor_row[core_dpid] % 2 == 0:
-                        tor_row[core_dpid] += 1
-                        #统计此core_dpid在此tor_grid中的位置
-                        pos = list()
-                        first = True
-                        for dpid in tor_row.keys:
-                            pos.append(str_to_dpid(dpid))
-                        pos.sort()
-                        for dpid in pos:
-                            if row[dpid_to_str(dpid)] == 1:
-                                if dpid == core_dpid:
-                                    break;
-                                else:
-                                    first = False
-                                    break
-                        #如果此core_dpid是状态为1的最前的dpid，则删除原流表并下发新流表，如果不是则不做处理
-                        if first:
-                            #删除旧流表
-                            match = of.ofp_match()
-                            match.dl_type = pkt.ethernet.IP_TYPE
-                            match.nw_dst = (IPAddr(tor_row.prefix),tor_row.mask)
-                            msg = of.ofp_flow_mod(command = of.OFPFC_DELETE,
-                                                  match = match)
-                            core.openflow.sendToDPID(str_to_dpid(tor_dpid),msg)
-
-                            #下发新流表
-                            match = of.ofp_match()
-                            match.dl_type = pkt.ethernet.IP_TYPE
-                            match.nw_dst = (IPAddr(tor_row.prefix),tor_row.mask)
-                            actions = list()
-                            actions.append(of.ofp_action_output(port = self.tor_grid[tor_dpid].port[core_dpid]))
-                            msg = of.ofp_flow_mod(command = of.OFPFC_ADD,
-                                                  match = match,
-                                                  actions = actions,
-                                                  idle_timeout = FLOW_IDLE_TIMEOUT,
-                                                  hard_timeout = of.OFP_FLOW_PERMANENT)
-                            core.openflow.sendToDPID(str_to_dpid(tor_dpid),msg)
-
-
-
+                                if self.tor_grid[tor_dpid].port[next] is not None:
+                                    match = of.ofp_match()
+                                    match.dl_type = pkt.ethernet.IP_TYPE
+                                    match.nw_dst = tor_row.prefix.toStr() + "/" + str(tor_row.mask)
+                                    actions = list()
+                                    actions.append(of.ofp_action_output(port = self.tor_grid[tor_dpid].port[next]))
+                                    msg = of.ofp_flow_mod(command = of.OFPFC_ADD,
+                                                          match = match,
+                                                          actions = actions,
+                                                          idle_timeout = FLOW_IDLE_TIMEOUT,
+                                                          hard_timeout = of.OFP_FLOW_PERMANENT)
+                                    core.openflow.sendToDPID(str_to_dpid(tor_dpid),msg)
 
     def _handle_IPv4In(self,event):
         return
