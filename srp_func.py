@@ -185,12 +185,51 @@ class SRPFunction(object):
 
     def _handle_ConnectionDown(self,event):
         dpid = dpid_to_str(event.dpid)
+        log.debug("[%s] Handle ConnectionDown Event!",dpid)
 
+        #失联的是Core
         if dpid in core.SRPConfig.core_list:
             if dpid in self.core_grid:
+
+                #删除失联的Core的Core_grid
                 del self.core_grid[dpid]
+
+                #删除其他Tor DPID对应的Tor_grid的相应列
                 for tor_rows in self.tor_grid.values():
                     tor_rows.del_column(dpid)
+                    #重新计算下发流表
+                    for tor_row in tor_rows:
+                        pos = list()
+                        first_dpid = None
+                        for tmp_dpid in tor_row.keys():
+                            pos.append(str_to_dpid(tmp_dpid))
+                        pos.sort()
+                        for tmp_dpid in pos:
+                            if tor_row[dpid_to_str(tmp_dpid)] == 1:
+                                first_dpid = dpid_to_str(tmp_dpid)
+                                break
+                        if first_dpid is not None:
+                            #删除旧流表
+                            match = of.ofp_match()
+                            match.dl_type = pkt.ethernet.IP_TYPE
+                            match.nw_dst = tor_row.prefix.toStr() + "/" + str(tor_row.mask)
+                            msg = of.ofp_flow_mod(command = of.OFPFC_DELETE,
+                                                  match = match)
+                            core.openflow.sendToDPID(str_to_dpid(tor_rows.dpid),msg)
+
+                            #下发新流表
+                            match = of.ofp_match()
+                            match.dl_type = pkt.ethernet.IP_TYPE
+                            match.nw_dst = tor_row.prefix.toStr() + "/" + str(tor_row.mask)
+                            actions = list()
+                            actions.append(of.ofp_action_output(port = tor_rows.port[first_dpid]))
+                            msg = of.ofp_flow_mod(command = of.OFPFC_ADD,
+                                                  match = match,
+                                                  actions = actions,
+                                                  idle_timeout = FLOW_IDLE_TIMEOUT,
+                                                  hard_timeout = of.OFP_FLOW_PERMANENT)
+                            core.openflow.sendToDPID(str_to_dpid(tor_rows.dpid),msg)
+        #失联的是Tor
         elif dpid in core.SRPConfig.tor_list:
             if dpid in self.tor_grid:
                 host,mask = parse_cidr(core.SRPConfig.get_tor_lan_addr(dpid))
@@ -199,32 +238,90 @@ class SRPFunction(object):
                 #删除失联Tor的Tor_grid
                 del self.tor_grid[dpid]
 
-                #清楚所有DPID对应的Core_Grid的相应行
+                #删除所有Core DPID对应的Core_Grid的相应行和列
                 for core_rows in self.core_grid.values():
                     core_rows.del_row(dpid,prefix,mask)
                     core_rows.del_column(dpid)
-                    #清楚所有DPID对应的Tor_Grid的相应行
-                    for tor_rows in self.tor_grid.values():
-                        tor_rows.del_row(dpid,prefix,mask)
+
+                    #因为Core只能从此断掉的Tor通往此Tor连接的网段，所以删除旧流表
+                    match = of.ofp_match()
+                    match.dl_type = pkt.ethernet.IP_TYPE
+                    match.nw_dst = prefix.toStr() + "/" + str(mask)
+                    msg = of.ofp_flow_mod(command = of.OFPFC_DELETE,
+                                          match = match)
+                    core.openflow.sendToDPID(str_to_dpid(core_rows.dpid),msg)
+
+                #删除其他Tor DPID对应的Tor_Grid的相应行
+                for tor_rows in self.tor_grid.values():
+                    tor_rows.del_row(dpid,prefix,mask)
+                    #因为只能从此断掉的Tor通往此Tor连接的网段，所以删除旧流表
+                    match = of.ofp_match()
+                    match.dl_type = pkt.ethernet.IP_TYPE
+                    match.nw_dst = prefix.toStr() + "/" + str(mask)
+                    msg = of.ofp_flow_mod(command = of.OFPFC_DELETE,
+                                          match = match)
+                    core.openflow.sendToDPID(str_to_dpid(tor_rows.dpid),msg)
 
     def _handle_LinkEvent(self,event):
+        log.debug("[%s] Handle Link Event!",event.link)
+
+        #寻找LinkEvent中dpid值对应的角色，并根据添加或删除连接事件属性作出相应的初始化或清理功能
         if dpid_to_str(event.link.dpid1) in core.SRPConfig.tor_list:
             tor_dpid,core_dpid = dpid_to_str(event.link.dpid1),dpid_to_str(event.link.dpid2)
-            if tor_dpid not in self.tor_grid or core_dpid not in self.core_grid:
-                event.used = False
-                return
             if event.added:
+                #判断对应DPID的Grid是否已经建立，如果未建立则占时放弃处理LinkEvent，等待LinkEvent Timer超时以后重新触发
+                if tor_dpid not in self.tor_grid or core_dpid not in self.core_grid:
+                    event.used = False
+                    return
+
+                log.debug("[%s] Handle Link Up Event!",event.link)
                 self.tor_grid[tor_dpid].port[core_dpid] = event.link.port1
                 self.core_grid[core_dpid].port[tor_dpid] = event.link.port2
+
+                #抑制Tor通往Core端口的广播功能
+                con = core.openflow.getConnection(str_to_dpid(tor_dpid))
+                for p in con.ports.itervalues():
+                    if p.port_no == event.link.port1:
+                        pm = of.ofp_port_mod(port_no=p.port_no,
+                                             hw_addr=p.hw_addr,
+                                             config =of.OFPPC_NO_FLOOD,
+                                             mask = of.OFPPC_NO_FLOOD)
+                        con.send(pm)
             elif event.removed:
+                #判断如果LinkDown Event是伴随ConnectionDown Event的，则不做处理
+                if tor_dpid not in self.tor_grid or core_dpid not in self.core_grid:
+                    return
+
+                log.debug("[%s] Handle Link Down Event!",event.link)
                 self.tor_grid[tor_dpid].port[core_dpid] = None
                 self.core_grid[core_dpid].port[tor_dpid] = None
         else:
             tor_dpid,core_dpid = dpid_to_str(event.link.dpid2),dpid_to_str(event.link.dpid1)
             if event.added:
+                #判断对应DPID的Grid是否已经建立，如果未建立则占时放弃处理LinkEvent，等待LinkEvent Timer超时以后重新触发
+                if tor_dpid not in self.tor_grid or core_dpid not in self.core_grid:
+                    event.used = False
+                    return
+
+                log.debug("[%s] Handle Link Up Event!",event.link)
                 self.tor_grid[tor_dpid].port[core_dpid] = event.link.port2
                 self.core_grid[core_dpid].port[tor_dpid] = event.link.port1
+
+                #抑制Tor通往Core端口的广播功能
+                con = core.openflow.getConnection(str_to_dpid(tor_dpid))
+                for p in con.ports.itervalues():
+                    if p.port_no == event.link.port2:
+                        pm = of.ofp_port_mod(port_no=p.port_no,
+                                             hw_addr=p.hw_addr,
+                                             config =of.OFPPC_NO_FLOOD,
+                                             mask = of.OFPPC_NO_FLOOD)
+                        con.send(pm)
             elif link.removed:
+                #判断如果LinkDown Event是伴随ConnectionDown Event的，则不做处理
+                if tor_dpid not in self.tor_grid or core_dpid not in self.core_grid:
+                    return
+
+                log.debug("[%s] Handle Link Down Event!",event.link)
                 self.tor_grid[tor_dpid].port[core_dpid] = None
                 self.core_grid[core_dpid].port[tor_dpid] = None
 
@@ -296,6 +393,9 @@ class SRPFunction(object):
                                     if tor_row[core_dpid] % 2 != 0:
                                         continue
 
+                                    if core_dpid in tor_rows.port:
+                                        tor_row[core_dpid] += 1
+
                                     #统计此core_dpid在此tor_grid中的位置
                                     pos = list()
                                     first = True
@@ -313,8 +413,6 @@ class SRPFunction(object):
                                     if first:
                                         if core_dpid in tor_row and core_dpid in tor_rows.port:
                                             if tor_rows.port[core_dpid] is not None:
-                                                tor_row[core_dpid] += 1
-
                                                 #删除旧流表
                                                 match = of.ofp_match()
                                                 match.dl_type = pkt.ethernet.IP_TYPE

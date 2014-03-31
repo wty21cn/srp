@@ -286,7 +286,7 @@ class LLDPUtil(EventMixin):
 
     def _set_link_validate_timer(self,validate_time):
         Timer(validate_time,self._handle_link_validate_timer,recurring=True)
-        
+
     def _handle_raise_link_event_timer(self,event):
         self.raiseEvent(event)
         log.info('Link detected: %s', event.link)
