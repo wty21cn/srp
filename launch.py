@@ -44,4 +44,9 @@ def launch(tor_num=20,core_num=6,**kw):
     import srp_func
     srp_func.launch()
 
+    import gephi
+    gephi.launch()
+
+
+
 

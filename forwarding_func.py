@@ -179,6 +179,19 @@ class SendARPReply(Event):
         self.outport = outport
 
 
+class HostEvent (Event):
+
+    """
+    Event when hosts join, leave, or move within the network
+    """
+
+    def __init__(self, entry, join):
+        super(HostEvent, self).__init__()
+        self.entry = entry
+        self.join = join
+        self.leave = not join
+
+
 def _dpid_to_mac(dpid):
     # Should maybe look at internal port MAC instead?
     return EthAddr("%012x" % (dpid & 0xffFFffFFffFF,))
@@ -186,7 +199,7 @@ def _dpid_to_mac(dpid):
 
 class ForwardingFunction (EventMixin):
 
-    _eventMixin_events = set([SendARPRequest, SendARPReply])
+    _eventMixin_events = set([SendARPRequest, SendARPReply,HostEvent])
 
     def __init__(self,timeout,no_flow,eat_packets,no_learn,*args,**kwargs):
 
@@ -209,7 +222,8 @@ class ForwardingFunction (EventMixin):
         core.addListeners(self)
         def _listen_to_dependencies():
             core.BaseUtil.addListeners(self,priority=100)
-        core.call_when_ready(_listen_to_dependencies, ('BaseUtil',))
+            core.LLDPUtil.addListeners(self,priority=100)
+        core.call_when_ready(_listen_to_dependencies, ('BaseUtil','LLDPUtil'))
 
         #Get SRPConfig
         def _get_config():
@@ -262,7 +276,6 @@ class ForwardingFunction (EventMixin):
                 empty.append(k)
         for k in empty:
             del self.ipv4_buffers[k]
-        return
 
     def _send_ipv4_buffer(self,dpid,dst_ip,mac,outport):
         if (dpid,dst_ip) in self.ipv4_buffers:
@@ -285,6 +298,24 @@ class ForwardingFunction (EventMixin):
                 msg.actions.append(of.ofp_action_dl_addr.set_dst(mac))
                 msg.actions.append(of.ofp_action_output(port=outport))
                 core.openflow.sendToDPID(str_to_dpid(dpid),msg)
+
+    def _handle_HostDownEvent(self,event):
+        dpid = event.dpid
+        port = event.port
+
+        if dpid in self.arp_table:
+            del_ip = None
+            for ip in self.arp_table[dpid]:
+                entry = self.arp_table[dpid][ip]
+                if entry.port == port:
+                    del_ip = ip
+                    entry = {"dpid":dpid,"port":port,"macaddr":entry.mac,"ipaddr":ip}
+                    ev = HostEvent(entry,False)
+                    self.raiseEvent(ev)
+                    break
+            if del_ip is not None:
+                del self.arp_table[dpid][del_ip]
+
 
     def _handle_GoingUpEvent(self, event):
         core.openflow.addListeners(self)
@@ -309,10 +340,14 @@ class ForwardingFunction (EventMixin):
             if entry.static is not True:
                 del self.arp_table[dpid][ip]
         log.debug("[%s] Clear ipv4 buffer",dpid)
+        delete_buffer = list()
         for k,entry in self.ipv4_buffers.iteritems():
             dpid_t,dst_ip = k
             if dpid == dpid_t:
-                del self.ipv4_buffers[(dpid,dst_ip)]
+                delete_buffer.append((dpid,dst_ip))
+
+        for entry in delete_buffer:
+            del self.ipv4_buffers[entry]
 
         log.debug("[%s] Clear arp buffer",dpid)
         for k,entry in self.arp_buffers.iteritems():
@@ -405,7 +440,12 @@ class ForwardingFunction (EventMixin):
 
         if ip in self.arp_table[dpid]:
             del self.arp_table[dpid][ip]
+
         self.arp_table[dpid][ip] = Entry(mac,port)
+        entry = {"dpid":dpid,"port":port,"macaddr":mac,"ipaddr":ip}
+        ev = HostEvent(entry,True)
+        self.raiseEvent(ev)
+
 
         #发送之前缓存的buffer中的报文
         self._send_ipv4_buffer(dpid,ip,mac,port)
@@ -415,57 +455,57 @@ class ForwardingFunction (EventMixin):
         dpid = dpid_to_str(event.connection.dpid)
         inport = event.inport
 
+        #判断是否是Core收到了IPv4In事件
         if dpid in core.SRPConfig.core_list:
             return
-
-        if same_network(dst_ip,core.SRPConfig.get_tor_lan_addr(dpid)):
-            #判断目的网段是否在对应DPID连接的网段中
-            if dst_ip in self.arp_table[dpid]:
-                #判断之前是否已经获得目的IP地址的MAC地址
-                table = self.arp_table[dpid][dst_ip]
-
-                log.debug("[%s] Send out the ipv4 packet: %s =>%s",dpid,event.ipv4p.srcip,dst_ip)
-                msg = of.ofp_packet_out(buffer_id = event.ofp.buffer_id, in_port = inport)
-                msg.actions.append(of.ofp_action_dl_addr.set_dst(table.mac))
-                msg.actions.append(of.ofp_action_output(port = table.port))
-                event.connection.send(msg)
-
-                log.debug("[%s] Set up the Flow for destination: %s",dpid,dst_ip)
-                actions = list()
-                actions.append(of.ofp_action_dl_addr.set_dst(table.mac))
-                actions.append(of.ofp_action_output(port = table.port))
-                match = of.ofp_match()
-                match.dl_type = pkt.ethernet.IP_TYPE
-                match.nw_dst = dst_ip
-                msg = of.ofp_flow_mod(command = of.OFPFC_MODIFY,
-                                      actions = actions,
-                                      match = match,
-                                      idle_timeout = FLOW_IDLE_TIMEOUT,
-                                      hard_timeout = of.OFP_FLOW_PERMANENT)
-                event.connection.send(msg)
-            else:
-                #缓存IPv4报文，并广播ARPRequest报文请求目的IP地址的MAC地址
-                log.debug("[%s] Buffer unsent IPv4 packet point to %s",dpid,dst_ip)
-                if (dpid,dst_ip) not in self.ipv4_buffers:
-                    self.ipv4_buffers[(dpid,dst_ip)] = []
-                buffers  = self.ipv4_buffers[(dpid,dst_ip)]
-                entry = (time.time()+MAX_BUFFER_TIME,event.ofp.buffer_id,inport)
-                buffers.append(entry)
-                while len(buffers)>MAX_BUFFERED_PER_IP:
-                    msg = of.ofp_packet_out(buffer_id=buffers[0][1],in_port=buffers[0][2])
-                    event.connection.send(msg)
-                    del buffers[0]
-
-                #触发SendARPRequest事件，请求该IPv4报文的目的IP地址对应的MAC地址
-                src_ip = parse_cidr(core.SRPConfig.get_tor_lan_addr(dpid))[0]
-                src_mac = _dpid_to_mac(event.connection.dpid)
-
-                log.debug("[%s] Raise SendARPRequest Event %s | %s => %s | %s",
-                      dpid,src_ip,src_mac,dst_ip,ETHER_BROADCAST)
-                ev = SendARPRequest(event.connection,src_ip,src_mac,dst_ip,ETHER_BROADCAST,flood=True)
-                self.raiseEvent(ev)
-        else:
+        #判断目的网段是否在对应DPID连接的网段中
+        if not same_network(dst_ip,core.SRPConfig.get_tor_lan_addr(dpid)):
             return
+
+        if dst_ip in self.arp_table[dpid]:
+            #判断之前是否已经获得目的IP地址的MAC地址
+            table = self.arp_table[dpid][dst_ip]
+
+            log.debug("[%s] Send out the ipv4 packet: %s =>%s",dpid,event.ipv4p.srcip,dst_ip)
+            msg = of.ofp_packet_out(buffer_id = event.ofp.buffer_id, in_port = inport)
+            msg.actions.append(of.ofp_action_dl_addr.set_dst(table.mac))
+            msg.actions.append(of.ofp_action_output(port = table.port))
+            event.connection.send(msg)
+
+            log.debug("[%s] Set up the Flow for destination: %s",dpid,dst_ip)
+            actions = list()
+            actions.append(of.ofp_action_dl_addr.set_dst(table.mac))
+            actions.append(of.ofp_action_output(port = table.port))
+            match = of.ofp_match()
+            match.dl_type = pkt.ethernet.IP_TYPE
+            match.nw_dst = dst_ip
+            msg = of.ofp_flow_mod(command = of.OFPFC_MODIFY,
+                                  actions = actions,
+                                  match = match,
+                                  idle_timeout = FLOW_IDLE_TIMEOUT,
+                                  hard_timeout = of.OFP_FLOW_PERMANENT)
+            event.connection.send(msg)
+        else:
+            #缓存IPv4报文，并广播ARPRequest报文请求目的IP地址的MAC地址
+            log.debug("[%s] Buffer unsent IPv4 packet point to %s",dpid,dst_ip)
+            if (dpid,dst_ip) not in self.ipv4_buffers:
+                self.ipv4_buffers[(dpid,dst_ip)] = []
+            buffers  = self.ipv4_buffers[(dpid,dst_ip)]
+            entry = (time.time()+MAX_BUFFER_TIME,event.ofp.buffer_id,inport)
+            buffers.append(entry)
+            while len(buffers)>MAX_BUFFERED_PER_IP:
+                msg = of.ofp_packet_out(buffer_id=buffers[0][1],in_port=buffers[0][2])
+                event.connection.send(msg)
+                del buffers[0]
+
+            #触发SendARPRequest事件，请求该IPv4报文的目的IP地址对应的MAC地址
+            src_ip = parse_cidr(core.SRPConfig.get_tor_lan_addr(dpid))[0]
+            src_mac = _dpid_to_mac(event.connection.dpid)
+
+            log.debug("[%s] Raise SendARPRequest Event %s | %s => %s | %s",
+                  dpid,src_ip,src_mac,dst_ip,ETHER_BROADCAST)
+            ev = SendARPRequest(event.connection,src_ip,src_mac,dst_ip,ETHER_BROADCAST,flood=True)
+            self.raiseEvent(ev)
 
 
 def launch(timeout=ARP_TIMEOUT,

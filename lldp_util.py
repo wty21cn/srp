@@ -88,11 +88,11 @@ class Adjacency(dict):
 class LinkEvent(Event):
 
     """
-    Link up/down event
+    Link Up/Down Event
     """
 
     def __init__(self, add, link):
-        Event.__init__(self)
+        super(LinkEvent,self).__init__()
         self.link = link
         self.added = add
         self.removed = not add
@@ -106,9 +106,20 @@ class LinkEvent(Event):
         return None
 
 
+class HostDownEvent(Event):
+    """
+    Host Down Event
+    """
+
+    def __init__(self,dpid,port):
+        super(HostDownEvent,self).__init__()
+        self.dpid = dpid_to_str(dpid)
+        self.port = port
+
+
 class LLDPUtil(EventMixin):
 
-    _eventMixin_events = set([LinkEvent])
+    _eventMixin_events = set([LinkEvent,HostDownEvent])
 
     SendItem = namedtuple("LLDPSenderItem", ('dpid', 'port_num', 'packet'))
     Link = Link
@@ -267,6 +278,9 @@ class LLDPUtil(EventMixin):
                 log.debug("Remove Link %s!",delete_link)
                 self.adjacency.pop(delete_link,None)
                 ev = LinkEvent(False,delete_link)
+                self.raiseEvent(ev)
+            else:
+                ev = HostDownEvent(dpid,port)
                 self.raiseEvent(ev)
         else:
             delete_link = list()

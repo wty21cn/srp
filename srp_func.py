@@ -20,7 +20,7 @@ from collections import namedtuple
 from pox.lib.util import dpid_to_str,str_to_bool,str_to_dpid
 from pox.lib.revent import EventHalt,Event
 from pox.lib.recoco import Timer
-from pox.lib.addresses import parse_cidr,parse_prefix
+from pox.lib.addresses import parse_cidr,parse_prefix,same_network
 from pox.lib.addresses import IPAddr
 
 import time
@@ -31,7 +31,9 @@ import pox.lib.packet as pkt
 
 #Global Var
 log = core.getLogger()
-FLOW_IDLE_TIMEOUT = of.OFP_FLOW_PERMANENT
+FLOW_IDLE_TIMEOUT = of.OFP_FLOW_PERMANENT   #由SRP算法算出的流表，超时时间设置为无穷大，永久有效，除非手动修改
+MAX_BUFFERED_PER_NETWORK = 5                     #Datapath为每个未知的目的IP地址缓存多少个报文
+MAX_BUFFER_TIME = 5                         #Buffer的超时时间
 
 class Debug_Event(Event):
 
@@ -124,12 +126,16 @@ class SRPFunction(object):
     def __init__(self):
         self.core_grid = SRPGrid_Set()
         self.tor_grid = SRPGrid_Set()
+        self.ipv4_buffers = dict()
         core.Interactive.variables["core_grid"] = self.core_grid
         core.Interactive.variables["tor_grid"] = self.tor_grid
 
         #For Debug
         core.Interactive.variables["scup"] = self._handle_debug_ConnectionUp
         core.Interactive.variables["scdown"] = self._handle_debug_ConnectionDown
+
+        # 定义IPv4 Buffer超时计时器
+        self._expire_ipv4_buffer_timer = Timer(5, self._handle_ipv4_buffer_expiration,recurring=True)
 
         #Listen to dependencies
         core.addListeners(self)
@@ -152,6 +158,10 @@ class SRPFunction(object):
 
     def _handle_ConnectionUp(self,event):
         dpid = dpid_to_str(event.dpid)
+
+        #清空switch的所有之前的非法流表
+        msg  = of.ofp_flow_mod(command=of.OFPFC_DELETE)
+        event.connection.send(msg)
 
         if dpid in core.SRPConfig.core_list:
             if dpid in self.core_grid:
@@ -366,6 +376,7 @@ class SRPFunction(object):
                                                   idle_timeout = FLOW_IDLE_TIMEOUT,
                                                   hard_timeout = of.OFP_FLOW_PERMANENT)
                             core.openflow.sendToDPID(str_to_dpid(tor_dpid),msg)
+
             #更改此UP链路连接的Core的Grid中UP链路连接的Tor对应的状态值
             for core_row in self.core_grid[core_dpid]:
                 if tor_dpid in core_row:
@@ -574,8 +585,91 @@ class SRPFunction(object):
                                                           hard_timeout = of.OFP_FLOW_PERMANENT)
                                     core.openflow.sendToDPID(str_to_dpid(tor_dpid),msg)
 
+    def _handle_ipv4_buffer_expiration(self):
+        empty = []
+        for k, v in self.ipv4_buffers.iteritems():
+            dpid, ip = k
+            for item in list(v):
+                expires_at, buffer_id, in_port = item
+                if expires_at < time.time():
+                    v.remove(item)
+                    #不为packet out消息指定outport action，则默认使DPID丢弃该报文
+                    msg = of.ofp_packet_out(buffer_id=buffer_id, in_port=in_port)
+                    core.openflow.sendToDPID(str_to_dpid(dpid), msg)
+            if len(v) == 0:
+                empty.append(k)
+        for k in empty:
+            del self.ipv4_buffers[k]
+
+    def _send_ipv4_buffer(self,dpid,dst_ip,outport):
+        if (dpid,dst_ip) in self.ipv4_buffers:
+            log.debug("[%s] Send buffered ipv4 packets to %s",dpid,dst_ip)
+            buffers = self.ipv4_buffers[(dpid,dst_ip)]
+            del self.ipv4_buffers[(dpid,dst_ip)]
+            for entry in buffers:
+                msg = of.ofp_packet_out(buffer_id=entry[1],in_port=entry[2])
+                msg.actions.append(of.ofp_action_output(port=outport))
+                core.openflow.sendToDPID(str_to_dpid(dpid),msg)
+
     def _handle_IPv4In(self,event):
-        return
+        dst_ip = event.ipv4p.dstip
+        dpid = dpid_to_str(event.connection.dpid)
+        inport = event.inport
+
+        #判断是否是Core收到了IPv4In事件
+        if dpid in core.SRPConfig.tor_list:
+            #判断目的网段是否在对应DPID连接的网段中
+            if same_network(dst_ip,core.SRPConfig.get_tor_lan_addr(dpid)):
+                return
+
+            for tor_row in self.tor_grid[dpid]:
+                if same_network(dst_ip,tor_row.prefix.toStr()+"/"+str(tor_row.mask)):
+                    pos = list()
+                    first_dpid = None
+                    for tmp_dpid in tor_row.keys():
+                        pos.append(str_to_dpid(tmp_dpid))
+                    pos.sort()
+                    for tmp_dpid in pos:
+                        if tor_row[dpid_to_str(tmp_dpid)] == 1:
+                            first_dpid = dpid_to_str(tmp_dpid)
+                            break
+                    #如果当前SRP已经计算出可用路径
+                    if first_dpid is not None:
+
+                        #按照可用路径发出此包
+                        log.debug("[%s] Send out the ipv4 packet: %s =>%s",dpid,event.ipv4p.srcip,dst_ip)
+                        msg = of.ofp_packet_out(buffer_id = event.ofp.buffer_id, in_port = inport)
+                        msg.actions.append(of.ofp_action_output(port = self.tor_grid[dpid].port[first_dpid]))
+                        core.openflow.sendToDPID(str_to_dpid(dpid),msg)
+
+                        #发送之前缓存的IPv4报文
+                        self._send_ipv4_buffer(dpid,dst_ip,self.tor_grid[dpid].port[first_dpid])
+
+                        #下发新流表
+                        log.debug("[%s] Set up the Flow for destination: %s",dpid,dst_ip)
+                        match = of.ofp_match()
+                        match.dl_type = pkt.ethernet.IP_TYPE
+                        match.nw_dst = tor_row.prefix.toStr() + "/" + str(tor_row.mask)
+                        actions = list()
+                        actions.append(of.ofp_action_output(port = tor_rows.port[first_dpid]))
+                        msg = of.ofp_flow_mod(command = of.OFPFC_ADD,
+                                              match = match,
+                                              actions = actions,
+                                              idle_timeout = FLOW_IDLE_TIMEOUT,
+                                              hard_timeout = of.OFP_FLOW_PERMANENT)
+                        core.openflow.sendToDPID(str_to_dpid(dpid),msg)
+                    else:
+                        if (dpid,dst_ip) not in self.ipv4_buffers:
+                            self.ipv4_buffers[(dpid,dst_ip)] = []
+                        buffers  = self.ipv4_buffers[(dpid,dst_ip)]
+                        entry = (time.time()+MAX_BUFFER_TIME,event.ofp.buffer_id,inport)
+                        buffers.append(entry)
+                        #超出最大Buffer数量，则从最老得开始丢弃
+                        while len(buffers)>MAX_BUFFERED_PER_NETWORK:
+                            msg = of.ofp_packet_out(buffer_id=buffers[0][1],in_port=buffers[0][2])
+                            core.openflow.sendToDPID(str_to_dpid(dpid),msg)
+                            del buffers[0]
+
 
 def launch():
     core.registerNew(SRPFunction)

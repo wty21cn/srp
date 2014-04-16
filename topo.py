@@ -97,6 +97,7 @@ def create_test_topo(hn=3,tor_num=2,core_num=2):
     net.stop()
     info("--- Network Stopped\n\n\n")
 
+
 if __name__ == "__main__":
     setLogLevel("info")
     argv = copy.deepcopy(sys.argv)
