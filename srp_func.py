@@ -32,7 +32,7 @@ import pox.lib.packet as pkt
 #Global Var
 log = core.getLogger()
 FLOW_IDLE_TIMEOUT = of.OFP_FLOW_PERMANENT   #由SRP算法算出的流表，超时时间设置为无穷大，永久有效，除非手动修改
-MAX_BUFFERED_PER_NETWORK = 5                     #Datapath为每个未知的目的IP地址缓存多少个报文
+MAX_BUFFERED_PER_NETWORK = 5                #Datapath为每个未知的目的IP地址缓存多少个报文
 MAX_BUFFER_TIME = 5                         #Buffer的超时时间
 
 class Debug_Event(Event):
@@ -44,7 +44,7 @@ class Debug_Event(Event):
 class SRPGrid_Row(dict):
 
     def __init__(self,dpid,prefix,mask):
-        dict.__init__({})
+        super(dict,self).__init__()
         self.dpid = dpid
         self.prefix = prefix
         self.mask  = mask
@@ -67,7 +67,7 @@ class SRPGrid_Set(dict):
 class SRPGrid(list):
 
     def __init__(self,dpid):
-        list.__init__([])
+        super(list,self).__init__()
         self.dpid = dpid
         self.port = dict() #通往对端DPID的本端Port字典
 

@@ -9,7 +9,7 @@ import copy
 
 def create_test_topo(hn=3,tor_num=2,core_num=2):
     """
-    Topology Fort Testing
+    Topology For Testing
     """
     #Var
     lan_prefix =["192.168.%d." % (i+1) for i in range(tor_num)]

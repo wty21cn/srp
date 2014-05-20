@@ -316,7 +316,6 @@ class ForwardingFunction (EventMixin):
             if del_ip is not None:
                 del self.arp_table[dpid][del_ip]
 
-
     def _handle_GoingUpEvent(self, event):
         core.openflow.addListeners(self)
         log.debug("Up...")
