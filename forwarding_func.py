@@ -131,7 +131,14 @@ class ARPTableSet(dict):
 
     def __repr__(self):
         repr = list()
-        for dpid,table in self.items():
+        tmpk = self.keys()[:]
+        for i in range(len(tmpk)):
+            tmpk[i] = str_to_dpid(tmpk[i])
+        tmpk = sorted(tmpk)
+        for i in range(len(tmpk)):
+            tmpk[i] = dpid_to_str(tmpk[i])
+        tmp = [(k,self[k]) for k in tmpk]
+        for dpid,table in tmp:
             repr.append("DPID:"+dpid)
             repr.append(table.__repr__()+"\n")
         return "\n".join(repr)

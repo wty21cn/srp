@@ -19,12 +19,12 @@ def create_test_topo(hn=3,tor_num=2,core_num=2):
     info("--- Creating Mininet\n")
     net = Mininet(controller=RemoteController)
     info(net)
-    info("\n--- Creating Mininet Finished\n\n\n")
+    info("\n--- Creating Mininet Finished\n\n")
 
     info("--- Adding Remote Controller\n")
     c0 = net.addController("c0",controller=RemoteController,ip="192.168.97.1",port=6633)
     info(c0)
-    info("\n--- Adding Remote Controller Finished\n\n\n")
+    info("\n--- Adding Remote Controller Finished\n\n")
 
     info("--- Adding Openflow Switches\n")
     tswitches = []
@@ -42,7 +42,7 @@ def create_test_topo(hn=3,tor_num=2,core_num=2):
         dpid = "00001000%0.2x000000" % (i+1)
         cswitches.append(net.addSwitch(name,dpid=dpid))
         info(cswitches[i],' ')
-    info("\n--- Adding Openflow Switches Finished\n\n\n")
+    info("\n--- Adding Openflow Switches Finished\n\n")
 
     info("--- Adding Hosts\n")
     hosts = []
@@ -54,7 +54,7 @@ def create_test_topo(hn=3,tor_num=2,core_num=2):
             hostname = "h%d_%d" % (j+1,i+1)
             hosts[i].append(net.addHost(hostname,ip=ip,mac=mac))
             info(hosts[i][j],' ')
-    info("\n--- Adding Hosts Finished\n\n\n")
+    info("\n--- Adding Hosts Finished\n\n")
 
 
 
@@ -69,7 +69,7 @@ def create_test_topo(hn=3,tor_num=2,core_num=2):
         for c in range(core_num):
             net.addLink(tswitches[t],cswitches[c])
             info("(",tswitches[t],"->",cswitches[c],")")
-    info("\n--- Adding Links Finished\n\n\n")
+    info("\n--- Adding Links Finished\n\n")
 
     info("--- Starting Network\n")
     net.start()
@@ -85,17 +85,17 @@ def create_test_topo(hn=3,tor_num=2,core_num=2):
 
     info("*** Setting Switches' Configuration\n")
 
-    info("--- Starting Network Finished\n\n\n")
+    info("--- Starting Network Finished\n\n")
 
 
     info("--- Running CLI\n\n")
     CLI(net)
-    info("--- Running CLI Finished\n\n\n")
+    info("--- Running CLI Finished\n\n")
 
 
     info("--- Stopping Network\n\n")
     net.stop()
-    info("--- Network Stopped\n\n\n")
+    info("--- Network Stopped\n\n")
 
 
 if __name__ == "__main__":

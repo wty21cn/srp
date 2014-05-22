@@ -50,12 +50,12 @@ class GephiWorker (RecocoIOWorker):
         self.data = b''
 
     def _handle_close(self):
-        log.info("Client disconnect")
+        log.debug("Client disconnect")
         super(GephiWorker, self)._handle_close()
         clients.discard(self)
 
     def _handle_connect(self):
-        log.info("Client connect")
+        log.debug("Client connect")
         super(GephiWorker, self)._handle_connect()
         core.GephiTopo.send_full(self)
         clients.add(self)
